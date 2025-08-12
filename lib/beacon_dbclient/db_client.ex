@@ -35,4 +35,19 @@ defmodule BeaconDbclient.DBClient do
       other -> other
     end
   end
+
+  def list_tables do
+    sql = """
+    select table_schema, table_name from information_schema.tables where table_type='BASE TABLE' and table_schema not in ('pg_catalog', 'information_schema')
+    order by table_schema, table_name
+    """
+
+    case query(sql) do
+      {:ok, %{rows: rows}} ->
+        Enum.map(rows, fn [schema, name] -> "#{schema}.#{name}" end)
+
+      other ->
+        other
+    end
+  end
 end
