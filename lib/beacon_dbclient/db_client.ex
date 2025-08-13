@@ -26,13 +26,22 @@ defmodule BeaconDbclient.DBClient do
 
     pid = connect!()
     result = Postgrex.query(pid, sql, params)
-    # <- replace Postgrex.stop/1
     _ = GenServer.stop(pid)
 
     case result do
-      {:ok, %Postgrex.Result{columns: cols, rows: rows}} -> {:ok, %{columns: cols, rows: rows}}
-      {:error, %Postgrex.Error{} = e} -> {:error, e}
-      other -> other
+      # SELECT / queries that return rows
+      {:ok, %Postgrex.Result{command: cmd, columns: cols, rows: rows}} when is_list(cols) ->
+        {:ok, %{command: cmd, columns: cols, rows: rows}}
+
+      # Non-SELECT (INSERT/UPDATE/DELETE, etc.)
+      {:ok, %Postgrex.Result{command: cmd, num_rows: n}} ->
+        {:ok, %{command: cmd, num_rows: n}}
+
+      {:error, %Postgrex.Error{} = e} ->
+        {:error, e}
+
+      other ->
+        other
     end
   end
 
