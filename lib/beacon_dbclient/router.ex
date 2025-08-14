@@ -55,6 +55,36 @@ defmodule BeaconDbclient.Router do
     end
   end
 
+  # Upsert plate:
+  defp route("iot/db/cmd/plate.upsert", %{"plate" => _plate} = req) do
+    attrs = Map.take(req, ["plate", "owner", "enabled", "valid_from", "valid_to"])
+
+    case BeaconDbclient.Plates.upsert(attrs) do
+      {:ok, p} ->
+        {:ok,
+         ok(
+           req,
+           %{id: p.id, plate: p.plate, owner: p.owner, enabled: p.enabled},
+           reply_topic("iot/db/cmd/plate.upsert")
+         )}
+
+      {:error, changeset} ->
+        {:error, inspect(changeset.errors)}
+    end
+  end
+
+  # Check plate:
+  defp route("iot/db/cmd/plate.check", %{"plate" => plate} = req) do
+    case BeaconDbclient.Plates.check(plate) do
+      {:allow, reason} ->
+        {:ok,
+         ok(req, %{decision: "allow", reason: reason}, reply_topic("iot/db/cmd/plate.check"))}
+
+      {:deny, reason} ->
+        {:ok, ok(req, %{decision: "deny", reason: reason}, reply_topic("iot/db/cmd/plate.check"))}
+    end
+  end
+
   defp route(other, _req), do: {:error, "unknown_topic: #{other}"}
 
   defp ok(req, data, reply_topic),

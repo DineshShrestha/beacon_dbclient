@@ -8,6 +8,7 @@ defmodule BeaconDbclient.Application do
   @impl true
   def start(_type, _args) do
     children = [
+      BeaconDbclient.Repo,
       # Starts a worker by calling: BeaconDbclient.Worker.start_link(arg)
       # {BeaconDbclient.Worker, arg}
       BeaconDbclient.MQTT
