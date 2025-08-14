@@ -10,6 +10,7 @@ defmodule BeaconDbclient.Application do
     children = [
       # Starts a worker by calling: BeaconDbclient.Worker.start_link(arg)
       # {BeaconDbclient.Worker, arg}
+      BeaconDbclient.MQTT
     ]
 
     # See https://hexdocs.pm/elixir/Supervisor.html
