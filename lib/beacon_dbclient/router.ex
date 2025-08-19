@@ -85,8 +85,52 @@ defmodule BeaconDbclient.Router do
     end
   end
 
-  defp route(other, _req), do: {:error, "unknown_topic: #{other}"}
 
+
+  # Operator wants to open gate
+  defp route("iot/db/cmd/gate.open", %{"device_id"=> dev}) do
+    # check if stop flag is active
+    case get_stop_flag() do
+      true -> 
+        {:error, "gate.stop active, cannot open"}
+      false -> 
+        # here you would trigger relay/pulse in real system
+        {:ok, %{decision: "manual_open", device_id: dev}}
+    end
+  end
+ 
+  # Operator emergency stop
+  defp route("iot/db/cmd/gate.stop", %{"device_id"=> dev}) do
+    set_stop_flag(true) 
+    {:ok, %{decision: "stopped", device_id: dev}}
+  end
+
+   # gate.status -> report current stop state
+   defp route("iot/db/cmd/gate.status", %{"device_id"=> _dev} = req) do
+    status = if get_stop_flag(), do: "stopped", else: "ready"
+    {:ok, ok(req, %{status: status}, reply_topic("iot/db/cmd/gate.status"))}
+  end
+  # gate.clear → lift emergency stop
+  defp route("iot/db/cmd/gate.clear", %{"device_id"=> _dev} = req) do
+    set_stop_flag(false)
+    {:ok, ok(req, %{decision: "cleared"}, reply_topic("iot/db/cmd/gate.clear"))}
+  end
+  defp route(other, _req), do: {:error, "unknown_topic: #{other}"}
+  defp get_stop_flag do
+    alias BeaconDbclient.{Repo, OpsFlag}
+    case Repo.get_by(OpsFlag, key: "gate") do
+      nil -> false
+      flag -> Map.get(flag.value, "stop", false)
+    end
+  end
+  defp set_stop_flag(val) do
+    alias BeaconDbclient.{Repo, OpsFlag}
+    Repo.insert!(
+      %OpsFlag{key: "gate", value: %{"stop"=> val}},
+      on_conflict: [set: [value: %{"stop"=> val}]],
+      conflict_target: :key
+    )
+  end
   defp ok(req, data, reply_topic),
     do: %{
       "ok" => true,
