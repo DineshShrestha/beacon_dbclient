@@ -129,6 +129,64 @@ defmodule BeaconDbclient.Router do
 
   defp route(other, _req), do: {:error, "unknown_topic: #{other}"}
 
+  defp route("iot/db/cmd/plate.check", %{"plate" => plate} = req) do
+    dev = Map.get(req, "device_id")
+
+    cond do
+      get_stop_flag() ->
+        {:ok,
+         ok(req, %{decision: "deny", reason: :stopped}, reply_topic("iot/db/cmd/plate.check"))}
+
+      not BeaconDbclient.Schedules.active?() ->
+        {:ok,
+         ok(
+           req,
+           %{decision: "deny", reason: :out_of_schedule},
+           reply_topic("iot/db/cmd/plate.check")
+         )}
+
+      true ->
+        case BeaconDbclient.Plates.check(plate) do
+          {:allow, reason} ->
+            _ = BeaconDbclient.Gate.pulse(%{reason: reason, plate: plate, device_id: dev})
+
+            {:ok,
+             ok(req, %{decision: "allow", reason: reason}, reply_topic("iot/db/cmd/plate.check"))}
+
+          {:deny, reason} ->
+            {:ok,
+             ok(req, %{decision: "deny", reason: reason}, reply_topic("iot/db/cmd/plate.check"))}
+        end
+    end
+  end
+
+  # Set global schedule
+  # payload: {"device_id":"edge-1","tz":"Europe/Oslo","weekly":{"mon":[["08:00","18:00"]],"sun":[]}}
+  defp route("iot/db/cmd/schedule.set", %{"weekly" => weekly} = req) do
+    attrs = %{
+      "tz" => Map.get(req, "tz", "Europe/Oslo"),
+      "weekly" => weekly
+    }
+
+    try do
+      s = BeaconDbclient.Schedules.upsert_global(attrs)
+      {:ok, ok(req, %{tz: s.tz, weekly: s.weekly}, reply_topic("iot/db/cmd/schedule.set"))}
+    rescue
+      e -> {:error, "bad_schedule: #{Exception.message(e)}"}
+    end
+  end
+
+  # Get global schedule
+  defp route("iot/db/cmd/schedule.get", req) do
+    case BeaconDbclient.Schedules.get_global() do
+      nil ->
+        {:ok, ok(req, %{tz: "Europe/Oslo", weekly: %{}}, reply_topic("iot/db/cmd/schedule.get"))}
+
+      s ->
+        {:ok, ok(req, %{tz: s.tz, weekly: s.weekly}, reply_topic("iot/db/cmd/schedule.get"))}
+    end
+  end
+
   # ---- Helpers ----
 
   defp get_stop_flag do
