@@ -10,12 +10,8 @@ defmodule BeaconDbclient.Router do
         try do
           route(topic, req)
         rescue
-          e in RuntimeError ->
-            {:error, e.message}
-
-          e ->
-            # fallback for unexpected errors
-            {:error, Exception.message(e)}
+          e in RuntimeError -> {:error, e.message}
+          e -> {:error, Exception.message(e)}
         end
 
       _ ->
@@ -23,7 +19,9 @@ defmodule BeaconDbclient.Router do
     end
   end
 
-  # health check: time + current_user
+  # --- ROUTES: specific first, catch-all last ---
+
+  # Health check (DB time + current_user)
   defp route("iot/db/cmd/check", req) do
     case DBClient.query("select now() as ts, current_user") do
       {:ok, %{columns: cols, rows: [row | _]}} ->
@@ -35,6 +33,7 @@ defmodule BeaconDbclient.Router do
     end
   end
 
+  # List tables
   defp route("iot/db/cmd/tables", req) do
     case DBClient.list_tables() do
       list when is_list(list) ->
@@ -48,6 +47,7 @@ defmodule BeaconDbclient.Router do
     end
   end
 
+  # SQL query (safe by default)
   defp route("iot/db/cmd/query", %{"sql" => sql} = req) do
     params = Map.get(req, "params", [])
     safe = Map.get(req, "safe", true)
@@ -58,7 +58,7 @@ defmodule BeaconDbclient.Router do
     end
   end
 
-  # Upsert plate
+  # Plate upsert
   defp route("iot/db/cmd/plate.upsert", %{"plate" => _} = req) do
     attrs = Map.take(req, ["plate", "owner", "enabled", "valid_from", "valid_to"])
 
@@ -72,63 +72,7 @@ defmodule BeaconDbclient.Router do
     end
   end
 
-  # Check plate with enforced stop flag + side-effect pulse on allow
-  defp route("iot/db/cmd/plate.check", %{"plate" => plate} = req) do
-    dev = Map.get(req, "device_id")
-
-    cond do
-      get_stop_flag() ->
-        {:ok,
-         ok(req, %{decision: "deny", reason: :stopped}, reply_topic("iot/db/cmd/plate.check"))}
-
-      true ->
-        case BeaconDbclient.Plates.check(plate) do
-          {:allow, reason} ->
-            _ = maybe_pulse(%{reason: reason, plate: nil, device_id: dev})
-
-            {:ok,
-             ok(req, %{decision: "allow", reason: reason}, reply_topic("iot/db/cmd/plate.check"))}
-
-          {:deny, reason} ->
-            {:ok,
-             ok(req, %{decision: "deny", reason: reason}, reply_topic("iot/db/cmd/plate.check"))}
-        end
-    end
-  end
-
-  # Operator wants to open gate (manual override)
-  defp route("iot/db/cmd/gate.open", %{"device_id" => dev} = req) do
-    if get_stop_flag() do
-      {:ok, ok(req, %{decision: "deny", reason: :stopped}, reply_topic("iot/db/cmd/gate.open"))}
-    else
-      _ = BeaconDbclient.Gate.pulse(%{reason: :manual_open, plate: nil, device_id: dev})
-
-      {:ok,
-       ok(req, %{decision: "manual_open", device_id: dev}, reply_topic("iot/db/cmd/gate.open"))}
-    end
-  end
-
-  # Operator emergency stop
-  defp route("iot/db/cmd/gate.stop", %{"device_id" => _dev} = req) do
-    :ok = set_stop_flag(true)
-
-    {:ok, ok(req, %{decision: "stopped"}, reply_topic("iot/db/cmd/gate.stop"))}
-  end
-
-  # gate.status -> report current stop state
-  defp route("iot/db/cmd/gate.status", %{"device_id" => _} = req) do
-    status = if get_stop_flag(), do: "stopped", else: "ready"
-    {:ok, ok(req, %{status: status}, reply_topic("iot/db/cmd/gate.status"))}
-  end
-
-  # gate.clear → lift emergency stop
-  defp route("iot/db/cmd/gate.clear", %{"device_id" => _} = req) do
-    :ok = set_stop_flag(false)
-    {:ok, ok(req, %{decision: "cleared"}, reply_topic("iot/db/cmd/gate.clear"))}
-  end
-
-  defp route(other, _req), do: {:error, "unknown_topic: #{other}"}
-
+  # Plate check — STOP and SCHEDULE enforced before plate DB check
   defp route("iot/db/cmd/plate.check", %{"plate" => plate} = req) do
     dev = Map.get(req, "device_id")
 
@@ -148,7 +92,7 @@ defmodule BeaconDbclient.Router do
       true ->
         case BeaconDbclient.Plates.check(plate) do
           {:allow, reason} ->
-            _ = BeaconDbclient.Gate.pulse(%{reason: reason, plate: plate, device_id: dev})
+            _ = maybe_pulse(%{reason: reason, plate: plate, device_id: dev})
 
             {:ok,
              ok(req, %{decision: "allow", reason: reason}, reply_topic("iot/db/cmd/plate.check"))}
@@ -160,13 +104,107 @@ defmodule BeaconDbclient.Router do
     end
   end
 
+  # Gate: manual open (respect stop)
+  defp route("iot/db/cmd/gate.open", %{"device_id" => dev} = req) do
+    if get_stop_flag() do
+      {:ok, ok(req, %{decision: "deny", reason: :stopped}, reply_topic("iot/db/cmd/gate.open"))}
+    else
+      _ = maybe_pulse(%{reason: :manual_open, plate: nil, device_id: dev})
+
+      {:ok,
+       ok(req, %{decision: "manual_open", device_id: dev}, reply_topic("iot/db/cmd/gate.open"))}
+    end
+  end
+
+  # Gate: stop / status / clear
+  defp route("iot/db/cmd/gate.stop", %{"device_id" => _} = req) do
+    :ok = set_stop_flag(true)
+    {:ok, ok(req, %{decision: "stopped"}, reply_topic("iot/db/cmd/gate.stop"))}
+  end
+
+  defp route("iot/db/cmd/gate.status", %{"device_id" => _} = req) do
+    status = if get_stop_flag(), do: "stopped", else: "ready"
+    {:ok, ok(req, %{status: status}, reply_topic("iot/db/cmd/gate.status"))}
+  end
+
+  defp route("iot/db/cmd/gate.clear", %{"device_id" => _} = req) do
+    :ok = set_stop_flag(false)
+    {:ok, ok(req, %{decision: "cleared"}, reply_topic("iot/db/cmd/gate.clear"))}
+  end
+
+  # LPR event ingestion (log decision; pulse on allow)
+  defp route("iot/lpr/event", %{"device_id" => dev, "plate" => plate} = req) do
+    conf = Map.get(req, "confidence")
+    snap = Map.get(req, "snapshot_url")
+
+    cond do
+      get_stop_flag() ->
+        _ =
+          BeaconDbclient.Events.log(%{
+            device_id: dev,
+            plate: plate,
+            confidence: conf,
+            snapshot_url: snap,
+            decision: "deny",
+            reason: "stopped",
+            meta: req
+          })
+
+        {:ok, ok(req, %{decision: "deny", reason: :stopped}, reply_topic("iot/lpr/event"))}
+
+      not BeaconDbclient.Schedules.active?() ->
+        _ =
+          BeaconDbclient.Events.log(%{
+            device_id: dev,
+            plate: plate,
+            confidence: conf,
+            snapshot_url: snap,
+            decision: "deny",
+            reason: "out_of_schedule",
+            meta: req
+          })
+
+        {:ok,
+         ok(req, %{decision: "deny", reason: :out_of_schedule}, reply_topic("iot/lpr/event"))}
+
+      true ->
+        case BeaconDbclient.Plates.check(plate) do
+          {:allow, reason} ->
+            _ = maybe_pulse(%{reason: reason, plate: plate, device_id: dev})
+
+            _ =
+              BeaconDbclient.Events.log(%{
+                device_id: dev,
+                plate: plate,
+                confidence: conf,
+                snapshot_url: snap,
+                decision: "allow",
+                reason: to_string(reason),
+                meta: req
+              })
+
+            {:ok, ok(req, %{decision: "allow", reason: reason}, reply_topic("iot/lpr/event"))}
+
+          {:deny, reason} ->
+            _ =
+              BeaconDbclient.Events.log(%{
+                device_id: dev,
+                plate: plate,
+                confidence: conf,
+                snapshot_url: snap,
+                decision: "deny",
+                reason: to_string(reason),
+                meta: req
+              })
+
+            {:ok, ok(req, %{decision: "deny", reason: reason}, reply_topic("iot/lpr/event"))}
+        end
+    end
+  end
+
   # Set global schedule
-  # payload: {"device_id":"edge-1","tz":"Europe/Oslo","weekly":{"mon":[["08:00","18:00"]],"sun":[]}}
   defp route("iot/db/cmd/schedule.set", %{"weekly" => weekly} = req) do
-    attrs = %{
-      "tz" => Map.get(req, "tz", "Europe/Oslo"),
-      "weekly" => weekly
-    }
+    attrs = %{"tz" => Map.get(req, "tz", "Europe/Oslo"), "weekly" => weekly}
 
     try do
       s = BeaconDbclient.Schedules.upsert_global(attrs)
@@ -187,7 +225,10 @@ defmodule BeaconDbclient.Router do
     end
   end
 
-  # ---- Helpers ----
+  # Catch-all LAST
+  defp route(other, _req), do: {:error, "unknown_topic: #{other}"}
+
+  # --- Helpers ---
 
   defp get_stop_flag do
     case Repo.get_by(OpsFlag, key: "gate") do
@@ -219,14 +260,15 @@ defmodule BeaconDbclient.Router do
   defp err_to_string(other), do: inspect(other)
 
   defp reply_topic("iot/db/cmd" <> cmd), do: "iot/db/resp" <> cmd
+  defp reply_topic("iot/lpr/event"), do: "iot/resp/lpr/event"
   defp reply_topic(_other), do: "iot/db/resp/unknown"
 
+  # Safe, pluggable pulse (does nothing if adapter missing)
   defp maybe_pulse(payload) do
     mod = Application.get_env(:beacon_dbclient, :gate_client, BeaconDbclient.NoopGate)
 
     cond do
       is_atom(mod) and Code.ensure_loaded?(mod) and function_exported?(mod, :pulse, 1) ->
-        # Don’t let pulse failures break the request flow
         try do
           mod.pulse(payload)
         rescue
