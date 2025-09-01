@@ -3,6 +3,8 @@ import Config
 config :beacon_dbclient, ecto_repos: [BeaconDbclient.Repo]
 
 config :beacon_dbclient, :gate_client, BeaconDbclient.NoopGate
+config :beacon_dbclient, :gate_client, BeaconDbclient.Gate.HttpGate
+config :beacon_dbclient, :gate_url, System.get_env("GATE_URL", "http://localhost:4001/pulse")
 
 config :beacon_dbclient, :db,
   host: System.get_env("DB_HOST", "127.0.0.1"),
